@@ -11,6 +11,7 @@ from telethon import functions, types
 api_id = os.environ.get('API_ID')
 api_hash = os.environ.get('API_HASH')
 vk_access_token = os.environ.get('VK_ACCESS_TOKEN')
+twitter_access_token = os.environ.get('TWITTER_ACCESS_TOKEN')
 
 async def print_chats(args):
     async with TelegramClient('hrminer', api_id, api_hash) as client:
@@ -127,6 +128,35 @@ async def check_vk(session, uid, username):
             data['vk_'+conn] = r[conn]
     return (uid, data, more)
 
+async def check_twitter(session, uid, username):
+    api_url = 'https://api.twitter.com/1.1/users/show.json'
+    params = {'screen_name': username}
+    headers = {'authorization': f'Bearer {twitter_access_token}'}
+    async with session.get(api_url, params=params, headers=headers) as response:
+        res = await response.json()
+        data = {}
+        if response.status == 200:
+            data['twitter'] = f"https://twitter.com/{res['screen_name']}"
+            if res.get('name'):
+                data['twitter_name'] = res['name']
+            if res.get('entities'):
+                for field, entities in res['entities'].items():
+                    if entities['urls']:
+                        urls = []
+                        for url in entities['urls']:
+                            urls.append(url['expanded_url'])
+                        if len(urls) == 1:
+                            data[f"twitter_{field}"] = urls[0]
+                        else:
+                            data[f"twitter_{field}"] = urls
+            else:
+                if res.get('url'):
+                    data['twitter_url'] = res['url']
+                if res.get('description'):
+                    urls = URL_RE.findall(res['description'] or '') or None
+                    data['twitter_descr'] = urls
+        return (uid, data, [])
+
 async def gather_data(tasks, data = {}):
     if tasks:
         results = await asyncio.gather(*tasks)
@@ -160,8 +190,8 @@ async def enrich(args):
                              'links': URL_RE.findall(info.about or '') or None}
                 if username:
                     requests.extend([
-                        check_vk(session, uid, username),
-                        try_head(session, uid, 'twitter', f"https://twitter.com/{username}"),
+                        check_vk(session, uid, username) if vk_access_token else try_head(session, uid, 'vk', f"https://vk.com/{username}"),
+                        check_twitter(session, uid, username) if twitter_access_token else try_head(session, uid, 'twitter', f"https://twitter.com/{username}"),
                         try_head(session, uid, 'github', f"https://github.com/{username}"),
                     ])
             rich = await gather_data(requests, rich)
