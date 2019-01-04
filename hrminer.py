@@ -157,6 +157,21 @@ async def check_twitter(session, uid, username):
                     data['twitter_descr'] = urls
         return (uid, data, [])
 
+async def check_github(session, uid, username):
+    api_url = f'https://api.github.com/users/{username}'
+    async with session.get(api_url) as response:
+        res = await response.json()
+        data = {}
+        if response.status == 200:
+            data['github'] = res['html_url']
+            for field in ("name", "company", "blog", "location", "email", "hireable"):
+                if res.get(field):
+                    data[f"github_{field}"] = res[field]
+            if res.get("bio"):
+                data['github_bio'] = URL_RE.findall(res['bio'] or '') or None
+
+        return (uid, data, [])
+
 async def gather_data(tasks, data = {}):
     if tasks:
         results = await asyncio.gather(*tasks)
@@ -192,7 +207,7 @@ async def enrich(args):
                     requests.extend([
                         check_vk(session, uid, username) if vk_access_token else try_head(session, uid, 'vk', f"https://vk.com/{username}"),
                         check_twitter(session, uid, username) if twitter_access_token else try_head(session, uid, 'twitter', f"https://twitter.com/{username}"),
-                        try_head(session, uid, 'github', f"https://github.com/{username}"),
+                        check_github(session, uid, username),
                     ])
             rich = await gather_data(requests, rich)
 
