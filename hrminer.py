@@ -10,6 +10,7 @@ from telethon import functions, types
 
 api_id = os.environ.get('API_ID')
 api_hash = os.environ.get('API_HASH')
+vk_access_token = os.environ.get('VK_ACCESS_TOKEN')
 
 async def print_chats(args):
     async with TelegramClient('hrminer', api_id, api_hash) as client:
@@ -62,12 +63,80 @@ async def print_top(args):
 
 URL_RE = re.compile(r"(?:http(?:s)?:\/\/.)?(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{2,256}\.[a-z]{2,6}\b(?:[-a-zA-Z0-9@:%_\+.~#?&//=]*)")
 
-async def try_head(session, key, url):
+async def try_head(session, uid, key, url):
     async with session.get(url) as response:
         code = response.status
         if code == 404:
             url = None
-        return (key, url)
+        return (uid, {key: url}, [])
+
+def format_vk_career(company, career):
+    result = company
+    if career.get('position'):
+        result += f", {career['position']}"
+    if career.get('from') or career.get('until'):
+        result += f", {career.get('from', '')}—{career.get('until', '')}"
+    return result
+
+async def vk_api(session, method, params):
+    api_url = f'https://api.vk.com/method/{method}'
+    params = dict({'v': '5.52', 'access_token': vk_access_token}, **params)
+    async with session.get(api_url, params=params) as response:
+        res = await response.json()
+        if res.get('response'):
+            return res['response'][0]
+        return None
+
+async def fetch_vk_career(session, uid, idx, career):
+    params = {'group_id': career['group_id']}
+    r = await vk_api(session, 'groups.getById', params)
+    if not r:
+        return (uid, [], [])
+    data = {f"vk_career_{idx}": format_vk_career(r['name'], career)}
+    return (uid, data, [])
+
+async def check_vk(session, uid, username):
+    data = {}
+    more = []
+
+    params = {'user_ids': username,
+              'fields': 'career,city,connections,domain,education,site'}
+    r = await vk_api(session, 'users.get', params)
+    if not r:
+        return (uid, data, more)
+
+    data['vk'] = f"https://vk.com/{r['domain']}"
+    data['vk_name'] = f"{r['first_name']} {r['last_name']}"
+    if 'city' in r:
+        data['vk_city'] = r['city']['title']
+    if r.get('site'):
+        data['vk_site'] = r['site']
+    if r.get('university_name'):
+        education = r['university_name']
+        if r.get('graduation'):
+            education += f" '{r['graduation']}"
+        data['vk_education'] = education
+    if r.get('career'):
+        for i, career in enumerate(r['career']):
+            if career.get('group_id'):
+                more.append(fetch_vk_career(session, uid, i, career))
+            else:
+                data[f"vk_career_{i}"] = format_vk_career(career['company'], career)
+    for conn in ('skype', 'facebook', 'twitter', 'livejournal', 'instagram'):
+        if r.get(conn):
+            data['vk_'+conn] = r[conn]
+    return (uid, data, more)
+
+async def gather_data(tasks, data = {}):
+    if tasks:
+        results = await asyncio.gather(*tasks)
+        more = []
+        for uid, d, m in results:
+            data[uid] = dict(data.get(uid, {}), **d)
+            more.extend(m)
+        if more:
+            return await gather_data(more, data)
+    return data
 
 async def enrich(args):
     user_ids = []
@@ -91,21 +160,20 @@ async def enrich(args):
                              'links': URL_RE.findall(info.about or '') or None}
                 if username:
                     requests.extend([
-                        try_head(session, (uid, 'vk'), f"https://vk.com/{username}"),
-                        try_head(session, (uid, 'twitter'), f"https://twitter.com/{username}"),
-                        try_head(session, (uid, 'github'), f"https://github.com/{username}"),
+                        check_vk(session, uid, username),
+                        try_head(session, uid, 'twitter', f"https://twitter.com/{username}"),
+                        try_head(session, uid, 'github', f"https://github.com/{username}"),
                     ])
-
-            for (uid, type), url in await asyncio.gather(*requests):
-                if url is not None:
-                    rich[uid][type] = url
+            rich = await gather_data(requests, rich)
 
     for uid in user_ids:
         r = rich[uid]
         print(f"{r['display_name']}")
-        for key in ('username', 'phone', 'links', 'tg', 'vk', 'twitter', 'github'):
-            if key in r and r[key]:
-                print(f"{key:>8}: {r[key]}")
+        keys = ['username', 'phone', 'links']
+        keys.extend(sorted(list(set(r.keys()) - set(keys) - set(('display_name',)))))
+        for key in keys:
+            if r[key]:
+                print(f"{key:<15} {r[key]}")
         print()
 
 async def main():
